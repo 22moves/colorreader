@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Color Cube with Stable Sound</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: black; color: white; font-family: Arial, sans-serif; }
+    canvas { position: absolute; top: 0; left: 0; z-index: -1; }
+    #startBtn {
+      position: absolute; top: 10px; left: 10px;
+      padding: 10px; background: white; color: black;
+      border: none; border-radius: 4px; cursor: pointer;
+    }
+    #startBtn:hover { background: #eee; }
+    #status {
+      position: absolute; top: 10px; right: 10px;
+      padding: 10px; background: rgba(0,0,0,0.5);
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <button id="startBtn">Start</button>
+  <div id="status">Waiting to start...</div>
+  <canvas id="vis"></canvas>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+  <script>
+    // Загружаем голоса, как только страница загрузится
+    window.speechSynthesis.onvoiceschanged = function() {
+      console.log("Voices loaded:", window.speechSynthesis.getVoices().length);
+    };
+    
+    const canvas = document.getElementById('vis');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    let width = canvas.width = window.innerWidth;
+    let height = canvas.height = window.innerHeight;
+
+    const cam = document.createElement('video');
+    cam.setAttribute('autoplay', '');
+    cam.setAttribute('playsinline', '');
+
+    let audioContext;
+    let synth;
+    let animationRunning = false;
+
+    // Создаем синтезатор заранее, но инициализируем только при нажатии кнопки
+    function initAudio() {
+      // Инициализация Tone.js после взаимодействия с пользователем
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      Tone.start();
+      synth = new Tone.Synth().toDestination();
+    }
+
+    const analyzerCanvas = document.createElement('canvas');
+    const aCtx = analyzerCanvas.getContext('2d');
+    analyzerCanvas.width = 100;
+    analyzerCanvas.height = 100;
+
+    let hue = 0, brightness = 0;
+    let colorName = '';
+    let lastColor = '';
+    let lastSpoken = '';
+    let rotation = 0;
+    let stableColor = { r: 0, g: 0, b: 0 };  // To store the stable color
+    let isRunning = false;
+
+    const soundMapping = {
+      red: "C4",
+      green: "D4",
+      blue: "E4",
+      yellow: "F4",
+      magenta: "G4",
+      cyan: "A4",
+      white: "B4",
+      black: "C5"
+    };
+
+    // Стабилизация цвета
+    let lastValidColorName = '';
+    let colorStabilityCount = 0;
+    const COLOR_STABILITY_THRESHOLD = 5;  // Сколько кадров подряд должен быть один цвет
+    
+    function rgbToColorName(r, g, b) {
+      if (r > 200 && g < 80 && b < 80) return "red";
+      if (g > 200 && r < 80 && b < 80) return "green";
+      if (b > 200 && r < 80 && g < 80) return "blue";
+      if (r > 200 && g > 200 && b < 100) return "yellow";
+      if (r > 200 && g < 80 && b > 200) return "magenta";
+      if (r < 80 && g > 200 && b > 200) return "cyan";
+      if (r > 220 && g > 220 && b > 220) return "white";
+      if (r < 50 && g < 50 && b < 50) return "black";
+      // Убираем серый для избежания ложных определений
+      return null;
+    }
+
+    function speak(text) {
+      // Проверяем, есть ли поддержка синтеза речи
+      if ('speechSynthesis' in window) {
+        // Останавливаем все текущие высказывания
+        window.speechSynthesis.cancel();
+        
+        const utter = new SpeechSynthesisUtterance(text);
+        utter.lang = 'en-US';
+        
+        // Настраиваем голос для более приятного звучания
+        utter.pitch = 1.0;  // Диапазон 0-2, где 1 - нормальный
+        utter.rate = 1.0;   // Скорость речи (0.1-10), где 1 - нормальная
+        utter.volume = 1.0; // Громкость (0-1)
+        
+        // Пытаемся найти женский голос
+        const voices = window.speechSynthesis.getVoices();
+        const femaleVoice = voices.find(voice => 
+          voice.name.includes('female') || 
+          voice.name.includes('woman') || 
+          voice.name.includes('girl')
+        );
+        
+        if (femaleVoice) {
+          utter.voice = femaleVoice;
+        }
+        
+        window.speechSynthesis.speak(utter);
+        
+        // Добавляем логирование для отладки
+        console.log(`Speaking: "${text}"`);
+      } else {
+        console.log("Speech synthesis not supported");
+      }
+    }
+
+    function getColor() {
+      if (!cam.videoWidth) {
+        statusEl.textContent = "Waiting for camera...";
+        return "waiting";
+      }
+      
+      // Рисуем кадр с камеры
+      aCtx.drawImage(cam, 0, 0, 100, 100);
+      
+      try {
+        const data = aCtx.getImageData(50, 50, 1, 1).data;
+        const [r, g, b] = [data[0], data[1], data[2]];
+        hue = Math.atan2(Math.sqrt(3)*(g - b), 2*r - g - b) * 180 / Math.PI;
+        if (hue < 0) hue += 360;
+        brightness = (r + g + b) / 3 / 255;
+        
+        // Используем более сильное сглаживание цвета для стабильности
+        stableColor.r = r * 0.2 + stableColor.r * 0.8;
+        stableColor.g = g * 0.2 + stableColor.g * 0.8;
+        stableColor.b = b * 0.2 + stableColor.b * 0.8;
+        
+        // Определяем цвет по стабилизированным значениям RGB
+        const newColorName = rgbToColorName(
+          Math.round(stableColor.r), 
+          Math.round(stableColor.g), 
+          Math.round(stableColor.b)
+        );
+        
+        // Если цвет не определен (не входит в наш список), сохраняем последний валидный
+        if (newColorName === null) {
+          statusEl.textContent = "Analyzing color...";
+          return lastValidColorName || "analyzing";
+        }
+        
+        // Обработка стабильности цвета
+        if (newColorName === lastValidColorName) {
+          colorStabilityCount++;
+        } else {
+          colorStabilityCount = 0;
+          lastValidColorName = newColorName; // Обновляем цвет сразу
+        }
+        
+        statusEl.textContent = `Color: ${lastValidColorName || "analyzing"} (stability: ${colorStabilityCount}/${COLOR_STABILITY_THRESHOLD})`;
+        return lastValidColorName || "analyzing";
+      } catch (e) {
+        console.error("Error getting image data:", e);
+        statusEl.textContent = "Error analyzing color";
+        return "error";
+      }
+    }
+
+    document.getElementById('startBtn').onclick = () => {
+      // Инициализируем аудио после взаимодействия с пользователем
+      initAudio();
+      
+      // Приветствие при запуске
+      speak("Hello color lover! Starting color reader");
+      statusEl.textContent = "Starting camera...";
+      
+      // Запрашиваем доступ к камере
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+        .then(stream => { 
+          cam.srcObject = stream;
+          // Подождём, пока видео загрузится и откроется
+          cam.onloadedmetadata = () => {
+            console.log("Camera ready, dimensions:", cam.videoWidth, cam.videoHeight);
+            isRunning = true;
+            statusEl.textContent = "Camera ready!";
+            
+            // Запускаем анимацию только если она еще не запущена
+            if (!animationRunning) {
+              animationRunning = true;
+              animate();
+            }
+          };
+        })
+        .catch(err => {
+          console.error("Camera error:", err);
+          speak("Camera access denied");
+          statusEl.textContent = "Camera access denied!";
+        });
+    };
+
+    function drawRotatingCube(color) {
+      ctx.save();
+      ctx.translate(width / 2, height / 2);
+      ctx.rotate(rotation);
+      ctx.fillStyle = color;
+      const size = 150;
+      ctx.fillRect(-size / 2, -size / 2, size, size);
+      ctx.restore();
+      rotation += 0.01;
+    }
+
+    // Запуск анимации
+    function animate() {
+      const colorName = getColor();
+      const rgbColor = `rgb(${Math.round(stableColor.r)}, ${Math.round(stableColor.g)}, ${Math.round(stableColor.b)})`;
+
+      // Фон
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, width, height);
+
+      // Рисуем вращающийся квадрат
+      drawRotatingCube(rgbColor);
+
+      // Дебаг информация (внизу экрана)
+      ctx.fillStyle = "white";
+      ctx.font = "16px monospace";
+      ctx.fillText(`RGB: ${Math.round(stableColor.r)}, ${Math.round(stableColor.g)}, ${Math.round(stableColor.b)}`, 20, height - 60);
+      ctx.fillText(`Camera: ${cam.videoWidth || 0}x${cam.videoHeight || 0}`, 20, height - 40);
+      ctx.fillText(`Current color: ${colorName}`, 20, height - 20);
+
+      // Произнесение цвета, если он изменился, стабилен и не является служебным значением
+      if (colorName !== lastSpoken && 
+          colorName !== "waiting" && 
+          colorName !== "error" && 
+          colorName !== "analyzing" &&
+          colorStabilityCount >= COLOR_STABILITY_THRESHOLD) {
+        
+        // Озвучиваем цвет более дружелюбной фразой
+        speak(`I see ${colorName}`);
+        lastSpoken = colorName;
+        
+        // Воспроизведение звука, если синтезатор инициализирован
+        if (synth && soundMapping[colorName]) {
+          // Небольшая задержка между речью и звуком
+          setTimeout(() => {
+            synth.triggerAttackRelease(soundMapping[colorName], "8n");
+          }, 500);
+        }
+      }
+
+      // Продолжаем анимацию
+      requestAnimationFrame(animate);
+    }
+
+    // Инициализация холста при изменении размера окна
+    window.addEventListener('resize', () => {
+      width = canvas.width = window.innerWidth;
+      height = canvas.height = window.innerHeight;
+    });
+
+    // Базовая отрисовка UI до запуска камеры
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "white";
+    ctx.font = "24px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("Press Start to begin color detection", width/2, height/2);
+  </script>
+</body>
+</html>
